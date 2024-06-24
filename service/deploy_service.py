@@ -1,6 +1,8 @@
 import json
 import logging
 
+import yaml
+
 from service import tosca_helper
 from service.ansible_service import AnsibleService
 
@@ -15,62 +17,64 @@ if not getattr(logger, 'handler_set', None):
 
 class DeployService:
 
-    def __init__(self, polemarch_base_url=None,polemarch_username=None,polemarch_password=None,
-                 semaphore_base_url=None,semaphore_username=None,semaphore_password=None, vms=None):
-        # self.polemarch_base_url = polemarch_base_url
-        # self.polemarch_username=polemarch_username
-        # self.polemarch_password = polemarch_password
+    def __init__(self, semaphore_base_url=None,semaphore_username=None,semaphore_password=None, vms=None):
+
         self.semaphore_base_url = semaphore_base_url
         self.semaphore_username = semaphore_username
         self.semaphore_password = semaphore_password
         self.vms = vms
         for vm in vms:
-            if vm.node_template.attributes['role'] == 'master':
+            vm_attributes = vm.node_template.attributes
+            if vm_attributes and 'public_ip' in vm.node_template.attributes and \
+                    vm.node_template.attributes['role'] == 'master':
                 self.master_ip = vm.node_template.attributes['public_ip']
                 break
 
-    def deploy(self, application):
-        # target = nodes_pair[0]
-        # source = nodes_pair[1]
-        interface_types = tosca_helper.get_interface_types(application)
+    def deploy(self, tosca_node):
+        logger.info('Deploying: '+str(tosca_node))
+        interface_types = tosca_helper.get_interface_types(tosca_node)
         if interface_types:
             ansible_service = AnsibleService(self.semaphore_base_url, self.semaphore_username, self.semaphore_password)
-            env_vars = self.get_env_vars(application)
+            env_vars = self.get_env_vars(tosca_node)
             if 'Standard' in interface_types:
-                task_outputs = ansible_service.execute(application, 'Standard', self.vms, env_vars=env_vars)
-                application = self.set_attributes(task_outputs, application)
+                task_outputs = ansible_service.execute(tosca_node, 'Standard', self.vms, env_vars=env_vars)
+                tosca_node = self.set_attributes(task_outputs, tosca_node)
             if 'Kubernetes' in interface_types:
-                task_outputs = ansible_service.execute(application, 'Kubernetes', self.vms, env_vars=env_vars)
-                application = self.set_attributes(task_outputs, application)
-        return application
+                task_outputs = ansible_service.execute(tosca_node, 'Kubernetes', self.vms, env_vars=env_vars)
+                tosca_node = self.set_attributes(task_outputs, tosca_node)
+            if 'Openstack' in interface_types:
+                task_outputs = ansible_service.execute(tosca_node, 'Openstack', self.vms, env_vars=env_vars)
+                tosca_node = self.set_attributes(task_outputs, tosca_node)
+        return tosca_node
 
-    def get_env_vars(self, source):
+    def get_env_vars(self, node):
         # target = nodes_pair[0]
         # source = nodes_pair[1]
         env_vars = {'K8s_NAMESPACE': 'default'}
-        if source.node_template.type == 'tosca.nodes.QC.Container.Application.Docker':
-            env_vars['DOCKER_IMAGE'] = source.node_template.artifacts['image']['file']
-            env_vars['DOCKER_SERVICE_NAME'] = source.name
+        if node.node_template.type == 'tosca.nodes.QC.Container.Application.Docker':
+            env_vars['DOCKER_IMAGE'] = node.node_template.artifacts['image']['file']
+            env_vars['DOCKER_SERVICE_NAME'] = node.name
             env_vars['CONTAINER_PORT'] = '80'
-            if 'ports' in source.node_template.properties:
-                env_vars['CONTAINER_PORT'] = source.node_template.properties['ports'][0].split(':')[1]
-            if 'environment' in source.node_template.properties:
-                env_vars['DOCKER_ENV_VARIABLES'] = source.node_template.properties['environment']
+            if 'ports' in node.node_template.properties:
+                env_vars['CONTAINER_PORT'] = node.node_template.properties['ports'][0].split(':')[1]
+            if 'environment' in node.node_template.properties:
+                env_vars['DOCKER_ENV_VARIABLES'] = node.node_template.properties['environment']
+        if node.node_template.type == 'tosca.nodes.QC.VM.topology':
+            credential = node.node_template.attributes['credential']
+            print(credential)
+            env_vars['DOCKER_IMAGE'] = node.node_template.artifacts['image']['file']
+
         return env_vars
 
-    def set_attributes(self, task_outputs,source):
-        # target = nodes_pair[0]
-        # source = nodes_pair[1]
-        if source.node_template.type == 'tosca.nodes.QC.docker.Orchestrator.Kubernetes':
-            source = self.set_kubernetes_attributes(source=source,task_outputs=task_outputs)
-        if source.node_template.type == 'tosca.nodes.QC.Container.Application.Docker':
-            source = self.set_docker_attributes(source=source, task_outputs=task_outputs)
-        if source.node_template.type == 'tosca.nodes.QC.Application.TIC':
-            source = self.set_tic_attributes(source=source, task_outputs=task_outputs)
-        # lst = list(nodes_pair)
-        # lst[1] = source
-        # nodes_pair = tuple(lst)
-        return source
+    def set_attributes(self, task_outputs, node):
+        node = self.set_current_state_attribute(source=node, task_outputs=task_outputs)
+        if node.node_template.type == 'tosca.nodes.QC.docker.Orchestrator.Kubernetes':
+            node = self.set_kubernetes_attributes(source=node, task_outputs=task_outputs)
+        if node.node_template.type == 'tosca.nodes.QC.Container.Application.Docker':
+            node = self.set_docker_attributes(source=node, task_outputs=task_outputs)
+        if node.node_template.type == 'tosca.nodes.QC.Application.TIC':
+            node = self.set_tic_attributes(source=node, task_outputs=task_outputs)
+        return node
 
 
 
@@ -143,25 +147,33 @@ class DeployService:
 
         k8s_dashboard_token = None
         k8s_services = None
-        for task_output_key in task_outputs:
-            task_output = task_outputs[task_output_key]
-            if not k8s_dashboard_token:
-                k8s_dashboard_token = self.parse_ansible_var('k8s_dashboard_token', task_output)
-            if not k8s_services:
-                k8s_services = self.parse_ansible_var('k8s_services', task_output)
-            if k8s_services and k8s_dashboard_token:
-                credential = {'token_type': 'k8s_dashboard_token'}
-                credential['token'] = self.get_dashboard_token(k8s_dashboard_token)
-                tokens.append(credential)
+        k8s_conf = None
+        if task_outputs:
+            for task_output_key in task_outputs:
+                task_output = task_outputs[task_output_key]
+                if not k8s_dashboard_token:
+                    k8s_dashboard_token = self.parse_ansible_var('k8s_dashboard_token', task_output)
+                if not k8s_services:
+                    k8s_services = self.parse_ansible_var('k8s_services', task_output)
+                if not k8s_conf:
+                    k8s_conf = self.parse_ansible_var('config_out', task_output)
+                if k8s_services and k8s_dashboard_token and k8s_conf:
+                    credential = {'token_type' : 'k8s_dashboard_token'}
+                    credential['token'] = self.get_dashboard_token(k8s_dashboard_token)
+                    tokens.append(credential)
 
-                service_port = self.get_service_port(k8s_services, 'kubernetes-dashboard', 'nodePort')
-                dashboard_url = 'https://' + self.master_ip + ':' + str(service_port)
-                attributes['dashboard_url'] = dashboard_url
-                logger.info('source.node_template.attributes: ' + str(attributes))
-                return source
-        raise Exception(
-            'Did not find k8s_services and/or k8s_dashboard_token')
-        return None
+                    service_port = self.get_service_port(k8s_services, 'kubernetes-dashboard', 'nodePort')
+                    dashboard_url = 'https://' + self.master_ip + ':' + str(service_port)
+                    attributes['dashboard_url'] = dashboard_url
+                    if 'stdout' in k8s_conf['config_out']:
+                        dict = yaml.load(k8s_conf['config_out']['stdout'])
+                        attributes['config'] = dict
+                    else:
+                        attributes['config'] = k8s_conf['config_out']
+                    logger.info('source.node_template.attributes: ' + str(attributes))
+            # raise Exception(
+            #     'Did not find k8s_services and/or k8s_dashboard_token')
+        return source
 
     def set_docker_attributes(self, source, task_outputs):
         attributes = source.node_template.attributes
@@ -176,7 +188,7 @@ class DeployService:
                 service_url = 'http://' + self.master_ip + ':' + str(service_port)
                 attributes['service_url'] = service_url
                 logger.info('source.node_template.attributes: ' + str(attributes))
-            return source
+        return source
 
     def set_tic_attributes(self, source, task_outputs):
         attributes = source.node_template.attributes
@@ -186,4 +198,10 @@ class DeployService:
             for port in ['8090','9000','9090']:
                 service_urls.append('http://' + self.master_ip + ':' + str(port))
             attributes['service_urls'] = service_urls
+        return source
+
+    def set_current_state_attribute(self, source, task_outputs):
+        attributes = source.node_template.attributes
+        if not 'current_state' in attributes:
+            attributes['current_state'] = 'RUNNING'
         return source

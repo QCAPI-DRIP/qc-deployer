@@ -5,13 +5,18 @@ requests==2.23.0
 wheel==0.34.2
 pyyaml==5.3.1
 matplotlib==3.2.1
-# ansible==2.9.6
 certifi==2020.4.5.1
 six==1.14.0
-python_dateutil==2.8.1
+#python_dateutil==2.8.1
 setuptools==46.1.3
 urllib3==1.25.8
 kubernetes==11.0.0
-sure-tosca-client==1.0.3
+sure-tosca-client==1.0.6
 semaphore-client==1.0.0
+ansible-tower-cli==3.3.9
+awxkit==15.0.1
+ansible==2.10.5
+cryptography==3.4.4
+tosca-parser==2.3.0
+validators==0.18.2
 
